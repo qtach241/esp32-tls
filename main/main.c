@@ -12,18 +12,20 @@
 #include "esp_http_client.h"
 
 #include "main.h"
-//#include "wifi_sta.h"   // WIFI module configuration, connecting to an access point.
 //#include "iap_https.h"  // Coordinating firmware updates
 
+#include "cJSON.h"
 
 #define TAG "main"
 #define BUFFSIZE 1024
+#define NETWORK_BUFFSIZE 4095
 
 static app_config_struct_t app_config;
 
 static esp_err_t app_event_handler(void *ctx, system_event_t *event);
 
 static char response_buffer[BUFFSIZE + 1] = { 0 };
+static char network_buffer[NETWORK_BUFFSIZE + 1] = { 0 };
 
 /* Root cert for howsmyssl.com, taken from howsmyssl_com_root_cert.pem
 
@@ -85,7 +87,7 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
             ESP_LOGI(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
             if (!esp_http_client_is_chunked_response(evt->client)) {
                 // Write out data
-                // printf("%.*s", evt->data_len, (char*)evt->data);
+                //ESP_LOGI(TAG, "%.*s", evt->data_len, (char*)evt->data);
             }
 
             break;
@@ -117,6 +119,42 @@ static void test_https()
         ESP_LOGE(TAG, "Error perform http request %s", esp_err_to_name(err));
     }
     esp_http_client_cleanup(client);
+}
+
+static void parse_json(const char * const monitor)
+{
+	hows_my_ssl_check_t hows_my_ssl_check;
+
+	const cJSON *tls_version = NULL;
+	const cJSON *rating = NULL;
+	int status = 0;
+	cJSON *monitor_json = cJSON_Parse(monitor);
+    if (monitor_json == NULL)
+    {
+        const char *error_ptr = cJSON_GetErrorPtr();
+        if (error_ptr != NULL)
+        {
+            fprintf(stderr, "Error before: %s\n", error_ptr);
+        }
+        status = 0;
+        goto end;
+    }
+
+	tls_version = cJSON_GetObjectItemCaseSensitive(monitor_json, "tls_version");
+    if (cJSON_IsString(tls_version) && (tls_version->valuestring != NULL))
+    {
+        printf("Parsed tls_version: \"%s\"\n", tls_version->valuestring);
+    }
+
+	rating = cJSON_GetObjectItemCaseSensitive(monitor_json, "rating");
+    if (cJSON_IsString(rating) && (rating->valuestring != NULL))
+    {
+        printf("Parsed rating: \"%s\"\n", rating->valuestring);
+    }
+
+end:
+    cJSON_Delete(monitor_json);
+    return status;
 }
 
 static void test_https_perform_as_stream_reader()
@@ -152,15 +190,16 @@ static void test_https_perform_as_stream_reader()
             //task_fatal_error();
         } else if (data_read > 0) {
         	response_buffer[data_read] = 0;
-            ESP_LOGI(TAG, "Received Data: %s", response_buffer);
+            //ESP_LOGI(TAG, "Received Data: %s", response_buffer);
             if (err != ESP_OK) {
                 esp_http_client_close(client);
     			esp_http_client_cleanup(client);
 				ESP_LOGE(TAG, "Error: SSL data read error");
                 //task_fatal_error();
             }
+			strcpy(&network_buffer[binary_file_length], response_buffer);
             binary_file_length += data_read;
-            ESP_LOGD(TAG, "Written image length %d", binary_file_length);
+            ESP_LOGI(TAG, "Written image length %d", binary_file_length);
         } else if (data_read == 0) {
             ESP_LOGI(TAG, "Connection closed,all data received");
             break;
@@ -170,6 +209,15 @@ static void test_https_perform_as_stream_reader()
     ESP_LOGI(TAG, "HTTP Stream reader Status = %d, content_length = %d",
                     esp_http_client_get_status_code(client),
                     esp_http_client_get_content_length(client));
+
+	// Null terminate the final byte of the buffer before we print it.
+	network_buffer[binary_file_length] = 0;
+
+	// Print out the network buffer.
+	ESP_LOGI(TAG, "Received Data: %s", network_buffer);
+
+	parse_json(network_buffer);
+	
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
     //free(buffer);
@@ -196,35 +244,23 @@ static void http_test_task(void *pvParameters)
 // returns, main task is deleted.
 void app_main(void)
 {
-	ESP_LOGI(TAG, "---------- Intialization started ----------");
-    ESP_LOGI(TAG, "---------- Software version: %2d -----------", SOFTWARE_VERSION);
-
-    
+	// Initialize ESP32 non-volatile flash.
     nvs_flash_init();
-    
-    
-    // Configure the application event handler.
-    // The handler is centrally implemented in this module.
-    // From here, we delegate the event handling to the responsible modules.
-    
+
+	// Create an event loop task and register the app event handler callback.
+	// The app event handler delegates events posted by the event daemon to
+	// the responsible modules.
     esp_event_loop_init(&app_event_handler, NULL);
 
-
-    // Configure the WIFI module. This module maintains the connection to the
-    // defined access point.
-
-    //init_wifi();
-    ESP_LOGI(TAG, "Set up WIFI network connection.");
-
+	// Initialize the Wi-Fi station module. This module maintains the ESP32's
+	// connection to the AP.
 	app_config.wifi_info.network_ssid = CONFIG_ESP_WIFI_SSID;
 	app_config.wifi_info.network_password = CONFIG_ESP_WIFI_PASSWORD;
-    
+	
     wifi_sta_init(&app_config.wifi_info);
-    
-    // Configure the over-the-air update module. This module periodically checks
-    // for firmware updates by polling a web server. If an update is available,
-    // the module downloads and installs it.
-    
+
+	// Initialize the OTA update module. This module manages the OTA firmware
+	// update component of the application.
     //init_ota();
 
 	// Test https task
@@ -235,16 +271,14 @@ void app_main(void)
 
     gpio_set_direction(GPIO_NUM_5, GPIO_MODE_OUTPUT);
     while (1) {
-        
+		
+		// Main app is simply to pulse an LED once if Wi-Fi is not connected
+		// and twice if the Wi-Fi is connected.
         int nofFlashes = 1;
         if (wifi_sta_is_connected())
 		{
             nofFlashes += 1;
         }
-        /*if (iap_https_update_in_progress()) {
-            nofFlashes += 2; // results in 3 (not connected) or 4 (connected) flashes
-        }*/
-        
         for (int i = 0; i < nofFlashes; i++)
 		{
             gpio_set_level(GPIO_NUM_5, 1);
@@ -252,17 +286,6 @@ void app_main(void)
             gpio_set_level(GPIO_NUM_5, 0);
             vTaskDelay(150 / portTICK_PERIOD_MS);
         }
-        
-        // If the application could only re-boot at certain points, you could
-        // manually query iap_https_new_firmware_installed and manually trigger
-        // the re-boot. What we do in this example is to let the firmware updater
-        // re-boot automatically after installing the update (see init_ota below).
-        //
-        // if (iap_https_new_firmware_installed()) {
-        //     ESP_LOGI(TAG, "New firmware has been installed - rebooting...");
-        //     esp_restart();
-        // }
-        
         vTaskDelay(500 / portTICK_PERIOD_MS);
     }
     
@@ -270,7 +293,8 @@ void app_main(void)
 }
 
 // Description:
-// This function handles events posted by the event daemon.
+// This function handles events posted by the event daemon by delegating them
+// to the various component event handlers.
 static esp_err_t app_event_handler(void *ctx, system_event_t *event)
 {
     esp_err_t result = ESP_OK;
@@ -278,15 +302,11 @@ static esp_err_t app_event_handler(void *ctx, system_event_t *event)
     
     ESP_LOGI(TAG, "app_event_handler: event: %d", event->event_id);
 
-    // Let the wifi_sta module handle all WIFI STA events.
-    
     result = wifi_sta_handle_event(ctx, event, &handled);
     if (ESP_OK != result || handled)
 	{
         return result;
     }
-    
-    // TODO - handle other events
     
     ESP_LOGW(TAG, "app_event_handler: unhandled event: %d", event->event_id);
     return ESP_OK;

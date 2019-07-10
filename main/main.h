@@ -34,6 +34,23 @@ typedef struct app_config_struct_ {
     
 } app_config_struct_t;
 
+// Structure holding the data returned from howmyssl.com API
+typedef struct hows_my_ssl_check_struct_ {
+
+	char given_cipher_suites;
+
+	bool ephemeral_keys_supported;
+	bool session_ticket_supported;
+	bool tls_compression_supported;
+	bool unknown_cipher_suite_supported;
+	bool beast_vuln;
+	bool able_to_detect_n_minus_one_splitting;
+
+	const char *tls_version;
+	const char *rating;
+	
+} hows_my_ssl_check_t;
+
 
 #endif // __MAIN_H__
 
