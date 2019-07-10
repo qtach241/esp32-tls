@@ -25,6 +25,9 @@ esp_err_t wifi_sta_handle_event(void *ctx, system_event_t *event, int *handled);
 // Returns 1 if the device is currently connected to the specified network, 0 otherwise.
 int wifi_sta_is_connected();
 
+// Wait until wifi is connected.
+void wifi_sta_wait_connected();
+
 // Let other modules wait on connectivity changes.
 EventGroupHandle_t wifi_sta_get_event_group();
 

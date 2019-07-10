@@ -172,6 +172,11 @@ int wifi_sta_is_connected()
     return (xEventGroupGetBits(wifi_sta_event_group) & WIFI_STA_EVENT_GROUP_CONNECTED_FLAG) ? 1 : 0;
 }
 
+void wifi_sta_wait_connected()
+{
+    xEventGroupWaitBits(wifi_sta_event_group, WIFI_STA_EVENT_GROUP_CONNECTED_FLAG, false, true, portMAX_DELAY);
+}
+
 
 static void wifi_sta_set_connected(bool c)
 {
