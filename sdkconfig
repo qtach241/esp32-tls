@@ -81,10 +81,10 @@ CONFIG_MONITOR_BAUD_OTHER_VAL=115200
 CONFIG_MONITOR_BAUD=115200
 
 #
-# Example Configuration
+# Project Configuration
 #
-CONFIG_ESP_WIFI_SSID="myssid"
-CONFIG_ESP_WIFI_PASSWORD="mypassword"
+CONFIG_ESP_WIFI_SSID="Dynasty-2.4G"
+CONFIG_ESP_WIFI_PASSWORD="longliveclq88"
 
 #
 # Partition Table
