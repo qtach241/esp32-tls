@@ -11,4 +11,11 @@ config ESP_WIFI_PASSWORD
     default "mypassword"
     help
 	WiFi password (WPA or WPA2) for the example to use.
+
+config FIRMWARE_UPGRADE_URL
+    string "firmware upgrade url endpoint"
+    default "https://192.168.0.15:8070/app-template.bin"
+    help
+        URL of server which hosts the firmware
+        image.	
 endmenu
