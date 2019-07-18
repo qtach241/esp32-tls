@@ -1,15 +1,24 @@
+#include <string.h>
+
 #include "freertos/FreeRTOS.h"
-#include "esp_wifi.h"
+#include "freertos/event_groups.h"
+#include "freertos/task.h"
+
 #include "esp_system.h"
+#include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_event_loop.h"
+#include "esp_log.h"
+#include "esp_flash_partitions.h"
+#include "esp_partition.h"
+
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 
-#include <string.h>
-#include "esp_log.h"
-#include "freertos/event_groups.h"
 #include "esp_http_client.h"
+#include "esp_https_ota.h"
+#include "esp_ota_ops.h"
 
 #include "main.h"
 //#include "iap_https.h"  // Coordinating firmware updates
@@ -19,6 +28,7 @@
 #define TAG "main"
 #define BUFFSIZE 1024
 #define NETWORK_BUFFSIZE 4095
+#define HASH_LEN 32 /* SHA-256 digest length */
 
 static app_config_struct_t app_config;
 
@@ -26,6 +36,7 @@ static esp_err_t app_event_handler(void *ctx, system_event_t *event);
 
 static char response_buffer[BUFFSIZE + 1] = { 0 };
 static char network_buffer[NETWORK_BUFFSIZE + 1] = { 0 };
+static char ota_write_data[BUFFSIZE + 1] = { 0 };
 
 /* Root cert for howsmyssl.com, taken from howsmyssl_com_root_cert.pem
 
@@ -39,6 +50,10 @@ static char network_buffer[NETWORK_BUFFSIZE + 1] = { 0 };
 */
 extern const char howsmyssl_com_root_cert_pem_start[] asm("_binary_howsmyssl_com_root_cert_pem_start");
 extern const char howsmyssl_com_root_cert_pem_end[]   asm("_binary_howsmyssl_com_root_cert_pem_end");
+
+extern const uint8_t server_cert_pem_start[] asm("_binary_ca_cert_pem_start");
+extern const uint8_t server_cert_pem_end[] asm("_binary_ca_cert_pem_end");
+
 
 
 // Description:
@@ -234,6 +249,164 @@ static void http_test_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
+static void http_cleanup(esp_http_client_handle_t client)
+{
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+}
+
+static void __attribute__((noreturn)) task_fatal_error()
+{
+    ESP_LOGE(TAG, "Exiting task due to fatal error...");
+    (void)vTaskDelete(NULL);
+
+    while (1) {
+        ;
+    }
+}
+
+void print_sha256 (const uint8_t *image_hash, const char *label)
+{
+    char hash_print[HASH_LEN * 2 + 1];
+    hash_print[HASH_LEN * 2] = 0;
+    for (int i = 0; i < HASH_LEN; ++i) {
+        sprintf(&hash_print[i * 2], "%02x", image_hash[i]);
+    }
+    ESP_LOGI(TAG, "%s: %s", label, hash_print);
+}
+
+
+void ota_example_task(void * pvParameter)
+{
+	uint8_t sha_256[HASH_LEN] = { 0 };
+	esp_partition_t partition;
+
+	esp_err_t err;
+    /* update handle : set by esp_ota_begin(), must be freed via esp_ota_end() */
+    esp_ota_handle_t update_handle = 0 ;
+    const esp_partition_t *update_partition = NULL;
+
+    wifi_sta_wait_connected();
+
+	ESP_LOGI(TAG, "Connected to AP, begin ota example...");
+
+	vTaskDelay(5000 / portTICK_PERIOD_MS);
+	
+	for (int countdown = 10; countdown > 0; countdown--)
+	{
+		ESP_LOGI(TAG, "Commencing ota example in... %d", countdown);
+		vTaskDelay(1000 / portTICK_PERIOD_MS);	
+	}
+
+	// get sha256 digest for the partition table
+    partition.address   = ESP_PARTITION_TABLE_OFFSET;
+    partition.size      = ESP_PARTITION_TABLE_MAX_LEN;
+    partition.type      = ESP_PARTITION_TYPE_DATA;
+    esp_partition_get_sha256(&partition, sha_256);
+    print_sha256(sha_256, "SHA-256 for the partition table: ");
+
+    // get sha256 digest for bootloader
+    partition.address   = ESP_BOOTLOADER_OFFSET;
+    partition.size      = ESP_PARTITION_TABLE_OFFSET;
+    partition.type      = ESP_PARTITION_TYPE_APP;
+    esp_partition_get_sha256(&partition, sha_256);
+    print_sha256(sha_256, "SHA-256 for bootloader: ");
+
+    // get sha256 digest for running partition
+    esp_partition_get_sha256(esp_ota_get_running_partition(), sha_256);
+    print_sha256(sha_256, "SHA-256 for current firmware: ");
+
+	const esp_partition_t *configured = esp_ota_get_boot_partition();
+    const esp_partition_t *running = esp_ota_get_running_partition();
+
+	if (configured != running) {
+        ESP_LOGW(TAG, "Configured OTA boot partition at offset 0x%08x, but running from offset 0x%08x",
+                 configured->address, running->address);
+        ESP_LOGW(TAG, "(This can happen if either the OTA boot data or preferred boot image become corrupted somehow.)");
+    }
+    ESP_LOGI(TAG, "Running partition type %d subtype %d (offset 0x%08x)",
+             running->type, running->subtype, running->address);
+    
+    esp_http_client_config_t config = {
+        //.url = CONFIG_FIRMWARE_UPGRADE_URL,
+        .url = "https://papapilldevstorage.blob.core.windows.net/ota/app-template.bin?st=2019-07-13T04%3A29%3A56Z&se=2022-07-14T04%3A29%3A00Z&sp=r&sv=2018-03-28&sr=b&sig=K2BVHPNs%2BjU2JkM%2BVZFlAMCJguXYugqjxdGULw8sRMo%3D",
+        //.cert_pem = (char *)server_cert_pem_start,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        ESP_LOGE(TAG, "Failed to initialise HTTP connection");
+        task_fatal_error();
+    }
+    err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        task_fatal_error();
+    }
+    esp_http_client_fetch_headers(client);
+
+    update_partition = esp_ota_get_next_update_partition(NULL);
+    ESP_LOGI(TAG, "Writing to partition subtype %d at offset 0x%x",
+             update_partition->subtype, update_partition->address);
+    assert(update_partition != NULL);
+
+    err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &update_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_begin failed (%s)", esp_err_to_name(err));
+        http_cleanup(client);
+        task_fatal_error();
+    }
+    ESP_LOGI(TAG, "esp_ota_begin succeeded");
+
+    int binary_file_length = 0;
+    /*deal with all receive packet*/
+    while (1) {
+        int data_read = esp_http_client_read(client, ota_write_data, BUFFSIZE);
+        if (data_read < 0) {
+            ESP_LOGE(TAG, "Error: SSL data read error");
+            http_cleanup(client);
+            task_fatal_error();
+        } else if (data_read > 0) {
+            err = esp_ota_write( update_handle, (const void *)ota_write_data, data_read);
+            if (err != ESP_OK) {
+                http_cleanup(client);
+                task_fatal_error();
+            }
+            binary_file_length += data_read;
+            ESP_LOGD(TAG, "Written image length %d", binary_file_length);
+        } else if (data_read == 0) {
+            ESP_LOGI(TAG, "Connection closed,all data received");
+            break;
+        }
+    }
+    ESP_LOGI(TAG, "Total Write binary data length : %d", binary_file_length);
+
+    if (esp_ota_end(update_handle) != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_end failed!");
+        http_cleanup(client);
+        task_fatal_error();
+    }
+
+    if (esp_partition_check_identity(esp_ota_get_running_partition(), update_partition) == true) {
+        ESP_LOGI(TAG, "The current running firmware is same as the firmware just downloaded");
+        int i = 0;
+        ESP_LOGI(TAG, "When a new firmware is available on the server, press the reset button to download it");
+        while(1) {
+            ESP_LOGI(TAG, "Waiting for a new firmware ... %d", ++i);
+            vTaskDelay(2000 / portTICK_PERIOD_MS);
+        }
+    }
+
+    err = esp_ota_set_boot_partition(update_partition);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_set_boot_partition failed (%s)!", esp_err_to_name(err));
+        http_cleanup(client);
+        task_fatal_error();
+    }
+    ESP_LOGI(TAG, "Prepare to restart system!");
+    esp_restart();
+    return ;
+}
 
 // Description: 
 // app_main is called by main_task which is spawned by FreeRTOS in cpu_start.c.
@@ -268,6 +441,9 @@ void app_main(void)
 
     // Blink an LED from a task
 	xTaskCreate(&blink_task, "blink_task", configMINIMAL_STACK_SIZE, NULL, 5, NULL);
+
+	// Test ota task
+	xTaskCreate(&ota_example_task, "ota_example_task", 8192, NULL, 5, NULL);
 
     gpio_set_direction(GPIO_NUM_5, GPIO_MODE_OUTPUT);
     while (1) {

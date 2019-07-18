@@ -8,7 +8,7 @@
 
 // Used by the OTA module to check if the current version is different from the version
 // on the server, i.e. if an upgrade or downgrade should be performed.
-#define SOFTWARE_VERSION          4
+#define SOFTWARE_VERSION          2
 
 // Provide server name, path to metadata file and polling interval for OTA updates.
 #define OTA_SERVER_HOST_NAME      "www.classycode.io"
